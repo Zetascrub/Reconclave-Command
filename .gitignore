@@ -1,0 +1,15 @@
+/.venv*/
+/web/node_modules/
+/web/dist/
+__pycache__/
+*.pyc
+*.tsbuildinfo
+*.sqlite*
+*.db
+*.log
+/.reconclave-data/
+/.reconclave-provisioning/
+.env
+.env.*
+!.env.example
+.DS_Store

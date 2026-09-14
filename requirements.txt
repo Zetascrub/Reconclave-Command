@@ -1,0 +1,2 @@
+zeroconf>=0.131,<1
+cryptography>=43,<47

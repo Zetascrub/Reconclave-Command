@@ -1,0 +1,10 @@
+{
+  "name": "ReconclaveIdentity",
+  "version": "0.1.0",
+  "description": "Canonical Reconclave brand identity (palette, strings) as header-only constants",
+  "build": {
+    "includeDir": "include"
+  },
+  "frameworks": "*",
+  "platforms": "*"
+}

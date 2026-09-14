@@ -1,0 +1,36 @@
+{
+  "$comment": "Single source of truth for Reconclave brand identity. Edit THIS file, then run `python3 tools/generate_identity.py` to regenerate identity.h and identity.css. Do not edit the generated files by hand.",
+  "schema": "reconclave-identity/1",
+  "brand": {
+    "name": "Reconclave",
+    "tagline": "Plan on the desktop. Observe in the field. Keep the evidence together.",
+    "meaning": "Reconnaissance + Conclave: independent nodes pooling capabilities and evidence.",
+    "mascot": "Zeta",
+    "mascot_role": "A project-independent mascot used by Reconclave. Zeta is not the product name or a Reconclave sub-brand.",
+    "creator_name": "Zetascrub",
+    "creator_name_role": "Creator credit and account name only; never present it as a product, theme, device, or feature name.",
+    "usb_manufacturer": "Reconclave"
+  },
+  "$palette_comment": "Canonical palette = the K230/Cardputer 'product family' set (also the README badges). The T-Display K230 ui_shell.h and Cardputer theme are the reference; the T-Dongle-S3 web UI predates this file and must migrate onto these values. Each token: hex plus a stated role. RGB565 (uint16) and 0xRRGGBB (uint32) forms are generated for embedded use.",
+  "palette": {
+    "canvas":         { "hex": "#050a10", "role": "Deepest application background and display canvas." },
+    "accent":         { "hex": "#00cdd7", "role": "Primary accent / cyan. Interactive, focus, brand." },
+    "warning":        { "hex": "#ffaa1c", "role": "Attention / amber. Warnings, active/destructive-adjacent state." },
+    "danger":         { "hex": "#ff4f87", "role": "Failure, destructive action, or blocked unsafe state." },
+    "surface":        { "hex": "#0e222e", "role": "Base surface / panel background." },
+    "surface_raised": { "hex": "#16303f", "role": "Raised surface / cards, headers, selected rows." },
+    "surface_selected": { "hex": "#164248", "role": "Selected or focused surface behind foreground content." },
+    "border":         { "hex": "#237670", "role": "Active component outline, divider, and progress track." },
+    "ink":            { "hex": "#fff2d7", "role": "Primary foreground text (warm off-white)." },
+    "ink_muted":      { "hex": "#c9b896", "role": "Secondary text, labels, muted detail." },
+    "disabled":       { "hex": "#3a4552", "role": "Unavailable / disabled capability or node." }
+  },
+  "$devices_comment": "The fleet roster. `type` is the wire device_type in announce messages. Firmware devices only; the desktop coordinator is listed for completeness but ships no embedded firmware.",
+  "devices": [
+    { "type": "desktop",       "display_name": "Desktop coordinator", "role": "Permanent hub: plan, dispatch, evidence custody, fleet management.", "firmware": false },
+    { "type": "cardputer-adv", "display_name": "Cardputer ADV",       "role": "Portable field console: Wi-Fi/BLE observation, NFC, sub-GHz, GPS.", "firmware": true },
+    { "type": "poe-p4",        "display_name": "Unit PoE-P4",         "role": "Wired execution node: network discovery, connectivity checks, automation.", "firmware": true },
+    { "type": "k230",          "display_name": "T-Display K230",      "role": "Touch console + edge-perception node: vision, OCR, classification.", "firmware": true, "usb_product": "Reconclave T-Display K230" },
+    { "type": "t-dongle-s3",   "display_name": "T-Dongle-S3",         "role": "USB HID / physical-interface node, scope-gated and evidence-logged.", "firmware": true, "usb_product": "Reconclave T-Dongle-S3" }
+  ]
+}
