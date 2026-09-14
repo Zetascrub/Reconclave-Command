@@ -5,7 +5,7 @@
 # Example: ./start-desktop.sh --enable-network-scan --evidence-dir ./evidence
 #
 # RECONCLAVE_EXECUTION_KEY / RECONCLAVE_EVIDENCE_KEY in the environment are
-# picked up by desktop_app.py itself -- see tools/desktop-node/README.md.
+# picked up by desktop_app.py itself -- see README.md.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

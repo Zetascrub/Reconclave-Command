@@ -1,6 +1,25 @@
+<div align="center">
+
+<img src="assets/zeta.png" alt="Zeta, the Reconclave mascot" width="150">
+
 # Reconclave Command
 
+### Plan the work. Coordinate the fleet. Keep the evidence.
+
+[![Runtime](https://img.shields.io/badge/runtime-Python_%2B_React-0e222e?style=flat-square)](#quick-start)
+[![Tests](https://img.shields.io/badge/tests-200_passing-00cdd7?style=flat-square)](#quick-start)
+[![Status](https://img.shields.io/badge/status-development_preview-ffaa1c?style=flat-square)](#application-capabilities)
+[![Family](https://img.shields.io/badge/family-Reconclave-fff2d7?style=flat-square)](https://github.com/Zetascrub/Reconclave)
+
 **The desktop coordinator for the Reconclave collective.**
+
+[Reconclave](https://github.com/Zetascrub/Reconclave) ·
+[ZetaDongle](https://github.com/Zetascrub/ZetaDongle) ·
+[FieldDeck](https://github.com/Zetascrub/FieldDeck) ·
+[Relay](https://github.com/Zetascrub/Relay) ·
+[Sightline](https://github.com/Zetascrub/Sightline)
+
+</div>
 
 Reconclave Command plans work, discovers cooperating nodes, dispatches tasks,
 and keeps assessment evidence and operational history together. It also runs as
@@ -22,7 +41,7 @@ a standalone local application without a hardware fleet.
 
 ## Application capabilities
 
-## Web coordinator
+## Quick start
 
 The desktop web application is the recommended interactive runtime. It acts as
 a node, coordinator, or both; discovers `_reconclave._tcp.local` peers; expires
