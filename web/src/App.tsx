@@ -22,6 +22,53 @@ function authHeaders(): Record<string, string> {
 
 const ACTIVITY_LIMIT = 20
 
+type ViewKey = 'network' | 'map' | 'jobs' | 'projects' | 'evidence' | 'automations' | 'workflows' | 'scopes' | 'findings' | 'timeline' | 'fleet' | 'distributed' | 'operators'
+const navigation: { title: string; items: { view: ViewKey; label: string; icon: string }[] }[] = [
+  { title: 'Overview', items: [
+    { view: 'network', label: 'Devices', icon: '⌁' },
+    { view: 'map', label: 'Network map', icon: '◎' },
+    { view: 'jobs', label: 'Jobs', icon: '◫' },
+    { view: 'timeline', label: 'Activity', icon: '≋' },
+  ] },
+  { title: 'Work', items: [
+    { view: 'projects', label: 'Projects', icon: '◇' },
+    { view: 'evidence', label: 'Evidence', icon: '▱' },
+    { view: 'findings', label: 'Findings', icon: '△' },
+    { view: 'scopes', label: 'Authorised scopes', icon: '⌗' },
+  ] },
+  { title: 'Fleet tools', items: [
+    { view: 'fleet', label: 'Fleet health', icon: '▤' },
+    { view: 'distributed', label: 'Distributed scans', icon: '⬡' },
+    { view: 'automations', label: 'Automations', icon: '↻' },
+    { view: 'workflows', label: 'Workflows', icon: '⎇' },
+  ] },
+  { title: 'Administration', items: [{ view: 'operators', label: 'People & approvals', icon: '☺' }] },
+]
+
+function deviceLabel(node: ReconNode) {
+  const type = node.device_type.toLowerCase()
+  if (type.includes('desktop')) return 'Desktop coordinator'
+  if (type.includes('poe-p4') || type === 'p4') return 'P4 PoE · Relay'
+  if (type.includes('k230')) return 'K230 · Sightline'
+  if (type.includes('cardputer') || type.includes('adv')) return 'Cardputer · FieldDeck'
+  if (type.includes('dongle')) return 'T-Dongle S3 · ZetaDongle'
+  if (type.includes('papermono')) return 'PaperMono'
+  if (type.includes('watch')) return 'ZetaWatch'
+  return node.device_type
+}
+
+function capabilityLabel(id: string) {
+  const labels: Record<string, string> = {
+    'system.info': 'Device information',
+    'net.discovery.scan': 'Discover network hosts',
+    'net.connectivity.check': 'Check connectivity',
+    'net.arp.snapshot': 'View nearby hosts',
+    'coordination.job.status': 'Check job progress',
+    'desktop.resources': 'Desktop resources',
+  }
+  return labels[id] ?? id.split('.').map((part) => part.replace(/_/g, ' ')).join(' · ')
+}
+
 function savedActivity(): Activity[] {
   try {
     const value = JSON.parse(localStorage.getItem('reconclave.activity') ?? '[]') as Array<Omit<Activity, 'time'> & { time: string }>
@@ -67,7 +114,8 @@ function capabilityMeta(node: ReconNode, id: string): CapabilityDescriptor {
 
 function NodeGlyph({ node }: { node: ReconNode }) {
   const label = node.device_type.includes('desktop') ? 'DX' :
-    node.device_type.includes('p4') ? 'P4' : node.device_type.includes('card') ? 'CP' : 'NX'
+    node.device_type.includes('p4') ? 'P4' : node.device_type.includes('k230') ? 'K2' :
+    node.device_type.includes('dongle') ? 'TD' : node.device_type.includes('card') || node.device_type.includes('adv') ? 'CP' : 'NX'
   return <div className={`node-glyph ${node.status}`}><span>{label}</span><i /></div>
 }
 
@@ -81,7 +129,7 @@ function defaultScope(address: string) {
 }
 
 function App() {
-  const [view, setView] = useState<'network' | 'map' | 'jobs' | 'projects' | 'evidence' | 'automations' | 'workflows' | 'scopes' | 'findings' | 'timeline' | 'fleet' | 'distributed' | 'operators'>('network')
+  const [view, setView] = useState<ViewKey>('network')
   const [state, setState] = useState<AppState>(emptyState)
   const [workspace, setWorkspace] = useState<WorkspaceData>(emptyWorkspace)
   const [projectId, setProjectId] = useState(() => localStorage.getItem('reconclave.project') ?? '')
@@ -96,6 +144,11 @@ function App() {
   const seenAuditIds = useRef<Set<string> | null>(null)
   const lastJobStatus = useRef<Map<string, string>>(new Map())
   const [filter, setFilter] = useState('')
+  const [peerOpen, setPeerOpen] = useState(false)
+  const [peerAddress, setPeerAddress] = useState('')
+  const [peerPort, setPeerPort] = useState('')
+  const [peerError, setPeerError] = useState('')
+  const [manualPeers, setManualPeers] = useState<{ address: string; port: number }[]>([])
   const [scoutOpen, setScoutOpen] = useState(false)
   const [scope, setScope] = useState({ network: '', start: '', end: '' })
   const [authorised, setAuthorised] = useState(false)
@@ -342,6 +395,12 @@ function App() {
     addActivity({ title: 'Vulnerability data imported', detail: String(body.format), tone: 'info' })
   }
 
+  async function importFieldReport(report: Record<string, unknown>) {
+    await postWorkspace('/api/evidence/field-report/import',
+      { project_id: projectId, report, operator_authorised: true })
+    addActivity({ title: 'Sightline report imported', detail: String(report.scope ?? 'field assessment'), tone: 'ok' })
+  }
+
   async function correlateFindings() {
     const result = await postWorkspace('/api/findings/correlate', { project_id: projectId }) as
       { confirmed_count: number; new_candidate_count: number }
@@ -405,9 +464,55 @@ function App() {
     return query ? state.nodes.filter((node) =>
       [node.device_id, node.device_type, ...node.capabilities].some((value) => value.toLowerCase().includes(query))) : state.nodes
   }, [filter, state.nodes])
-  const selected = state.nodes.find((node) => node.device_id === selectedId) ?? state.nodes[0]
+  const selected = nodes.find((node) => node.device_id === selectedId) ?? nodes[0]
   const capabilityCount = new Set(state.nodes.flatMap((node) => node.capabilities)).size
   const coordinatorCount = state.nodes.filter((node) => node.roles.includes('coordinator')).length
+  const readyCount = state.nodes.filter((node) => node.status === 'ready').length
+  const attentionCount = state.nodes.filter((node) => node.status === 'degraded' || (!node.local && node.trust?.status !== 'verified')).length
+
+  async function refreshManualPeers() {
+    const response = await fetch('/api/peers', { headers: authHeaders() })
+    if (!response.ok) throw new Error('Could not load saved devices')
+    const body = await response.json() as { peers: { address: string; port: number }[] }
+    setManualPeers(body.peers)
+  }
+
+  async function rescanFleet() {
+    const response = await fetch('/api/discovery/scan', { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: '{}' })
+    if (!response.ok) throw new Error('Could not start discovery scan')
+  }
+
+  async function verifyFleetTrust(deviceId: string) {
+    const response = await fetch(`/api/nodes/${encodeURIComponent(deviceId)}/verify-trust`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: '{}' })
+    const result = await response.json() as { status?: string; detail?: string; message?: string }
+    if (!response.ok) throw new Error(result.message || 'Could not verify device key')
+    if (result.status !== 'verified') throw new Error(result.detail || 'Device key is not verified')
+  }
+
+  async function addManualPeer(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setPeerError('')
+    try {
+      const response = await fetch('/api/peers', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ address: peerAddress.trim(), port: Number(peerPort) }),
+      })
+      const body = await response.json() as { message?: string; connected?: boolean }
+      if (!response.ok) throw new Error(body.message || 'Could not save device')
+      setPeerAddress(''); setPeerPort('')
+      await refreshManualPeers()
+      if (!body.connected) setPeerError('Saved. The device is offline now; Reconclave will keep checking it.')
+    } catch (error) { setPeerError(error instanceof Error ? error.message : 'Could not save device') }
+  }
+
+  async function removeManualPeer(address: string, port: number) {
+    try {
+      const response = await fetch(`/api/peers?address=${encodeURIComponent(address)}&port=${port}`,
+        { method: 'DELETE', headers: authHeaders() })
+      if (!response.ok) throw new Error('Could not remove device')
+      await refreshManualPeers()
+    } catch (error) { setPeerError(error instanceof Error ? error.message : 'Could not remove device') }
+  }
 
   function addActivity(entry: Omit<Activity, 'id' | 'time'>) {
     setActivity((items) => [{ ...entry, id: crypto.randomUUID(), time: new Date() }, ...items].slice(0, ACTIVITY_LIMIT))
@@ -532,9 +637,9 @@ function App() {
       <div className="ambient ambient-one" /><div className="ambient ambient-two" />
       <header className="topbar">
         <div className="brand-mark"><span>R</span></div>
-        <div className="brand"><strong>RECONCLAVE</strong><span>OPERATIONS DECK</span></div>
+        <div className="brand"><strong>RECONCLAVE</strong><span>DEVICE WORKSPACE</span></div>
         <div className="topbar-spacer" />
-        <div className={`link-state ${connected ? 'online' : ''}`}><i />{connected ? 'LIVE LINK' : 'RECONNECTING'}</div>
+        <div className={`link-state ${connected ? 'online' : ''}`}><i />{connected ? 'Connected to coordinator' : 'Connecting to coordinator'}</div>
         <div className="notif-wrap" ref={notifRef}>
           <button className={`notif-bell ${notifOpen ? 'active' : ''}`} title="Notifications"
             onClick={() => { setNotifOpen((open) => !open); if (!notifOpen) setUnreadCount(0) }}>
@@ -554,37 +659,53 @@ function App() {
           : <button className="operator"><span>LOCAL</span><strong>{state.coordinator_id || 'INITIALISING'}</strong></button>}
       </header>
 
-      <aside className="rail">
+      <aside className="rail rail-expanded">
         <nav aria-label="Primary navigation">
-          <button className={view === 'network' ? 'active' : ''} title="Network" onClick={() => setView('network')}><span>⌁</span><small>Network</small></button>
-          <button className={view === 'map' ? 'active' : ''} title="Map" onClick={() => setView('map')}><span>◎</span><small>Map</small></button>
-          <button className={view === 'jobs' ? 'active' : ''} title="Jobs" onClick={() => setView('jobs')}><span>◫</span><small>Jobs</small></button>
-          <button className={view === 'projects' ? 'active' : ''} title="Projects" onClick={() => setView('projects')}><span>◇</span><small>Projects</small></button>
-          <button className={view === 'evidence' ? 'active' : ''} title="Evidence" onClick={() => setView('evidence')}><span>▱</span><small>Evidence</small></button>
-          <button className={view === 'automations' ? 'active' : ''} title="Automations" onClick={() => setView('automations')}><span>↻</span><small>Rules</small></button>
-          <button className={view === 'workflows' ? 'active' : ''} title="Workflows" onClick={() => setView('workflows')}><span>⎇</span><small>Flows</small></button>
-          <button className={view === 'scopes' ? 'active' : ''} title="Scopes" onClick={() => setView('scopes')}><span>⌗</span><small>Scope</small></button>
-          <button className={view === 'findings' ? 'active' : ''} title="Findings" onClick={() => setView('findings')}><span>△</span><small>Risks</small></button>
-          <button className={view === 'timeline' ? 'active' : ''} title="Timeline" onClick={() => setView('timeline')}><span>≋</span><small>Audit</small></button>
-          <button className={view === 'fleet' ? 'active' : ''} title="Fleet" onClick={() => setView('fleet')}><span>▤</span><small>Fleet</small></button>
-          <button className={view === 'distributed' ? 'active' : ''} title="Distributed scanning" onClick={() => setView('distributed')}><span>⬡</span><small>Distrib</small></button>
-          <button className={view === 'operators' ? 'active' : ''} title="Operators and approvals" onClick={() => setView('operators')}><span>☺</span><small>Access</small></button>
+          {navigation.map((group) => <section className="nav-group" key={group.title}>
+            <h2>{group.title}</h2>
+            {group.items.map((item) => <button key={item.view} className={view === item.view ? 'active' : ''}
+              aria-current={view === item.view ? 'page' : undefined} title={item.label} onClick={() => setView(item.view)}>
+              <span aria-hidden="true">{item.icon}</span><small>{item.label}</small>
+            </button>)}
+          </section>)}
         </nav>
-        <div className="rail-foot"><div className="pulse-ring" /><small>RC/01</small></div>
+        <div className="rail-foot"><div className="pulse-ring" /><small>{readyCount} ready · {attentionCount} need attention</small></div>
       </aside>
 
       <main>{view === 'network' ? <>
         <section className="hero">
-          <div><p className="eyebrow">DISTRIBUTED OPERATIONS</p><h1>Network constellation</h1>
-            <p className="subhead">Live capability map across trusted and discoverable nodes.</p></div>
+          <div><p className="eyebrow">YOUR FLEET</p><h1>Devices</h1>
+            <p className="subhead">See what is connected, check its health, and choose an action.</p></div>
           <div className="hero-time"><span>{state.updated_at_ms ? new Date(state.updated_at_ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '--:--'}</span><small>LAST TELEMETRY</small></div>
         </section>
 
         <section className="metrics">
-          <article><span className="metric-icon cyan">⌁</span><div><strong>{state.nodes.length.toString().padStart(2, '0')}</strong><small>ACTIVE NODES</small></div><em>DISCOVERED</em></article>
-          <article><span className="metric-icon violet">◇</span><div><strong>{capabilityCount.toString().padStart(2, '0')}</strong><small>CAPABILITIES</small></div><em>AVAILABLE</em></article>
-          <article><span className="metric-icon amber">△</span><div><strong>{coordinatorCount.toString().padStart(2, '0')}</strong><small>COORDINATORS</small></div><em>ONLINE</em></article>
+          <article><span className="metric-icon cyan">⌁</span><div><strong>{readyCount}</strong><small>READY DEVICES</small></div><em>{state.nodes.length} discovered</em></article>
+          <article><span className="metric-icon violet">◇</span><div><strong>{capabilityCount}</strong><small>AVAILABLE CAPABILITIES</small></div><em>Across the fleet</em></article>
+          <article><span className="metric-icon amber">△</span><div><strong>{attentionCount}</strong><small>NEED ATTENTION</small></div><em>{coordinatorCount} coordinators</em></article>
         </section>
+
+        <section className="getting-started panel" aria-label="Quick actions">
+          <div><span className="kicker">QUICK ACTIONS</span><h2>What would you like to do?</h2><p>Choose a device below to inspect its capabilities, or open a workspace tool.</p></div>
+          <div className="quick-actions">
+            <button onClick={() => document.getElementById('device-roster')?.scrollIntoView({ behavior: 'smooth' })}>Browse devices</button>
+            <button onClick={() => { setPeerOpen(!peerOpen); if (!peerOpen) refreshManualPeers().catch(() => setPeerError('Could not load saved devices')) }}>Add a device</button>
+            <button onClick={() => setView('jobs')}>View jobs</button>
+            <button onClick={() => setView('evidence')}>Open evidence</button>
+          </div>
+        </section>
+        {peerOpen && <section className="manual-peers panel" aria-label="Add a device by address">
+          <div><span className="kicker">DIRECT CONNECTION</span><h2>Add a device by address</h2>
+            <p>Use this when a device is on your network but does not appear automatically. The address is saved for future sessions.</p></div>
+          <form onSubmit={addManualPeer}>
+            <label>IP address<input required inputMode="decimal" placeholder="192.168.8.136" value={peerAddress} onChange={(event) => setPeerAddress(event.target.value)} /></label>
+            <label>Port<input required inputMode="numeric" placeholder="8787" value={peerPort} onChange={(event) => setPeerPort(event.target.value)} /></label>
+            <button type="submit">Save device</button>
+          </form>
+          {peerError && <p className="peer-message" role="status">{peerError}</p>}
+          {manualPeers.length > 0 && <div className="saved-peers"><strong>Saved addresses</strong>{manualPeers.map((peer) =>
+            <div key={`${peer.address}:${peer.port}`}><span>{peer.address}:{peer.port}</span><button onClick={() => removeManualPeer(peer.address, peer.port)} aria-label={`Remove ${peer.address}:${peer.port}`}>Remove</button></div>)}</div>}
+        </section>}
 
         {scanJob && <section className={`job-strip ${scanJob.job_status}`}>
           <div className="job-orbit"><span>{scanJob.job_status === 'running' ? '⌁' : '✓'}</span></div>
@@ -598,30 +719,30 @@ function App() {
         </section>}
 
         <section className="workspace">
-          <div className="roster panel">
-            <div className="panel-head"><div><span className="kicker">NODE ROSTER</span><h2>Connected systems</h2></div><span className="count">{nodes.length}</span></div>
-            <label className="search"><span>⌕</span><input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Filter nodes or capabilities" /></label>
+          <div className="roster panel" id="device-roster">
+            <div className="panel-head"><div><span className="kicker">DEVICES</span><h2>Connected devices</h2></div><span className="count">{nodes.length}</span></div>
+            <label className="search"><span>⌕</span><input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Search devices or capabilities" aria-label="Search devices or capabilities" /></label>
             <div className="node-list">
               {nodes.map((node) => <button key={node.device_id} onClick={() => { setSelectedId(node.device_id); setResult(null) }} className={`node-row ${node.device_id === selected?.device_id ? 'selected' : ''}`}>
-                <NodeGlyph node={node} /><span className="node-copy"><strong>{node.device_id}</strong><small>{node.device_type} · {node.address}</small></span>
+                <NodeGlyph node={node} /><span className="node-copy"><strong>{deviceLabel(node)}</strong><small>{node.device_id} · {node.address}</small></span>
                 <span className="node-tail"><i className={node.status} />{node.local ? 'LOCAL' : timeAgo(node.age_seconds)}</span>
               </button>)}
-              {!nodes.length && <div className="empty"><span>⌁</span><strong>No matching signals</strong><small>Clear the filter or wait for discovery.</small></div>}
+              {!nodes.length && <div className="empty"><span>⌁</span><strong>{filter ? 'No devices match your search' : 'No devices discovered yet'}</strong><small>{filter ? 'Try a device name, address, or capability.' : 'Check that the devices are on this network and advertising Reconclave.'}</small></div>}
             </div>
           </div>
 
           <div className="detail panel">
             {selected ? <>
-              <div className="detail-head"><NodeGlyph node={selected} /><div><span className="kicker">SELECTED NODE</span><h2>{selected.device_id}</h2><p>{selected.device_type} · firmware {selected.firmware}</p></div><span className={`status-pill ${selected.status}`}><i />{selected.status}</span></div>
+              <div className="detail-head"><NodeGlyph node={selected} /><div><span className="kicker">DEVICE DETAILS</span><h2>{deviceLabel(selected)}</h2><p>{selected.device_id} · firmware {selected.firmware}</p></div><span className={`status-pill ${selected.status}`}><i />{selected.status}</span></div>
               <div className="facts">
                 <div><small>ENDPOINT</small><strong>{selected.address}:{selected.port}</strong></div>
                 <div><small>LINK PROFILE</small><strong>{selected.resources.network_mbps ? `${selected.resources.network_mbps} Mbps` : 'Unreported'}</strong></div>
                 <div><small>STORAGE FREE</small><strong>{bytes(selected.resources.storage_free_bytes)}</strong></div>
                 <div><small>ROLES</small><strong>{selected.roles.join(' / ')}</strong></div>
-                <div><small>TRUST</small><strong>{selected.security?.paired ? selected.security.mode ?? 'Paired' : 'Public / unpaired'}</strong></div>
+                <div><small>TRUST</small><strong>{selected.trust?.status === 'verified' ? 'Verified key' : selected.trust?.status === 'key_installed' ? 'Key installed, unverified' : selected.local ? 'Local coordinator' : 'Unpaired'}</strong></div>
                 <div><small>ACTIVE COORDINATOR</small><strong>{selected.security?.active_coordinator ? `${selected.security.active_coordinator} · P${selected.security.active_priority}` : selected.security?.primary_coordinator ?? 'None leased'}</strong></div>
               </div>
-              <div className="cap-head"><div><span className="kicker">CAPABILITY MATRIX</span><h3>Available actions</h3></div><span>{selected.capabilities.length} advertised</span></div>
+              <div className="cap-head"><div><span className="kicker">DEVICE ACTIONS</span><h3>What this device can do</h3></div><span>{selected.capabilities.length} advertised</span></div>
               <div className="capabilities">
                 {selected.capabilities.map((capability) => {
                   const meta = capabilityMeta(selected, capability)
@@ -629,13 +750,13 @@ function App() {
                   const directlyInvokable = capability === 'system.info' || capability === 'desktop.resources' || capability === 'coordination.job.status' || capability === 'net.connectivity.check' || capability === 'net.arp.snapshot'
                   return <article key={capability}>
                     <div className="cap-sigil">{capability.split('.').map((part) => part[0]).join('').slice(0, 2).toUpperCase()}</div>
-                    <div className="cap-copy"><strong>{capability}</strong><span>v{meta.version} · {meta.permission}</span>{meta.features?.length ? <small>{meta.features.join(' · ')}</small> : null}</div>
-                    <button disabled={(!directlyInvokable && !isScout) || !!busyCapability || (isScout && scanJob?.job_status === 'running')} onClick={() => isScout ? configureScout() : invoke(capability)}>{busyCapability === capability ? 'CALLING…' : isScout ? 'CONFIGURE' : directlyInvokable ? 'INVOKE' : 'PLANNED'}</button>
+                    <div className="cap-copy"><strong>{capabilityLabel(capability)}</strong><span>{capability} · {meta.permission}{meta.version ? ` · v${meta.version}` : ''}</span>{meta.features?.length ? <small>{meta.features.join(' · ')}</small> : null}</div>
+                    <button disabled={(!directlyInvokable && !isScout) || !!busyCapability || (isScout && scanJob?.job_status === 'running')} onClick={() => isScout ? configureScout() : invoke(capability)}>{busyCapability === capability ? 'WORKING…' : isScout ? 'SET UP SCAN' : directlyInvokable ? 'RUN' : 'NOT IN DESKTOP YET'}</button>
                   </article>
                 })}
               </div>
               {result && <div className="result"><div><span className="kicker">LATEST RESPONSE</span><button onClick={() => setResult(null)}>CLOSE</button></div><pre>{JSON.stringify(result, null, 2)}</pre></div>}
-            </> : <div className="empty large"><span>⌁</span><strong>Waiting for constellation</strong><small>Reconclave nodes will appear here as they announce.</small></div>}
+            </> : <div className="empty large"><span>⌁</span><strong>{filter ? 'Choose another search' : 'Waiting for devices'}</strong><small>{filter ? 'No device in this search can be inspected.' : 'Reconclave devices will appear here when discovery succeeds.'}</small></div>}
           </div>
 
           <div className="activity panel">
@@ -646,7 +767,7 @@ function App() {
             </div>
           </div>
         </section>
-      </> : <WorkspaceViews view={view} workspace={workspace} nodes={state.nodes} projectId={projectId} onProject={setProjectId} onCreate={createProject} onInspect={inspectSelectedHosts} onCreateAutomation={createAutomation} onUpdateAutomation={updateAutomation} onDeleteAutomation={deleteAutomation} onCreateWorkflow={createWorkflow} onRunWorkflow={runWorkflow} onCancelWorkflow={cancelWorkflow} onUpdateWorkflow={updateWorkflow} onDeleteWorkflow={deleteWorkflow} onCreateScope={createScope} onImportFindings={importFindings} onCorrelateFindings={correlateFindings} onSetFindingStatus={setFindingStatus} onSetFindingSuppression={setFindingSuppression} onCreateRelease={createRelease} onCreateRollout={createRollout} onAdvanceRollout={advanceRollout} onRollbackRollout={rollbackRollout} onCreateDistributedScan={createDistributedScan} onCancelDistributedScan={cancelDistributedScan} currentOperator={session?.operator ?? null} onCreateOperator={createOperator} onDecideApproval={decideApproval} />}</main>
+      </> : <WorkspaceViews view={view} workspace={workspace} nodes={state.nodes} discovery={state.discovery} onRescan={rescanFleet} onVerifyTrust={verifyFleetTrust} projectId={projectId} onProject={setProjectId} onCreate={createProject} onInspect={inspectSelectedHosts} onCreateAutomation={createAutomation} onUpdateAutomation={updateAutomation} onDeleteAutomation={deleteAutomation} onCreateWorkflow={createWorkflow} onRunWorkflow={runWorkflow} onCancelWorkflow={cancelWorkflow} onUpdateWorkflow={updateWorkflow} onDeleteWorkflow={deleteWorkflow} onCreateScope={createScope} onImportFindings={importFindings} onImportFieldReport={importFieldReport} onCorrelateFindings={correlateFindings} onSetFindingStatus={setFindingStatus} onSetFindingSuppression={setFindingSuppression} onCreateRelease={createRelease} onCreateRollout={createRollout} onAdvanceRollout={advanceRollout} onRollbackRollout={rollbackRollout} onCreateDistributedScan={createDistributedScan} onCancelDistributedScan={cancelDistributedScan} currentOperator={session?.operator ?? null} onCreateOperator={createOperator} onDecideApproval={decideApproval} />}</main>
       {scoutOpen && selected && <div className="modal-shade" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setScoutOpen(false) }}>
         <section className="scout-modal" role="dialog" aria-modal="true" aria-labelledby="scout-title">
           <div className="modal-head"><div><span className="kicker">SCOPED OPERATION</span><h2 id="scout-title">Configure Network Scout</h2><p>Provider: {selected.device_id}</p></div><button onClick={() => setScoutOpen(false)} aria-label="Close">×</button></div>

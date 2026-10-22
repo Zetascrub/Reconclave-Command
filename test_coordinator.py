@@ -79,6 +79,24 @@ class CoordinatorTests(unittest.TestCase):
         self.now += coordinator_module.NODE_TTL_SECONDS + 1
         self.assertEqual([item["device_id"] for item in self.coordinator.state()["nodes"]], ["rc-local"])
 
+    def test_advertised_paired_flag_does_not_count_as_verified_trust(self):
+        announcement = self.announcement()
+        announcement["payload"]["security"] = {"paired": True, "mode": "hmac-sha256-128"}
+        self.coordinator.peers["rc-peer"] = coordinator_module.Peer(
+            "rc-peer", "192.0.2.8", 8767, announcement, self.now)
+        self.assertEqual(self.coordinator.state()["nodes"][1]["trust"]["status"], "key_installed")
+
+    def test_trust_check_never_invokes_hid_only_node(self):
+        announcement = self.announcement(capabilities=["input.hid.keystroke"])
+        announcement["payload"]["capability_descriptors"] = [
+            {"id": "input.hid.keystroke", "permission": "trusted"}]
+        self.coordinator.peers["rc-peer"] = coordinator_module.Peer(
+            "rc-peer", "192.0.2.8", 8767, announcement, self.now)
+        with mock.patch.object(self.coordinator, "invoke") as invoke:
+            result = self.coordinator.verify_trust("rc-peer")
+        invoke.assert_not_called()
+        self.assertEqual(result["status"], "key_installed")
+
     def test_invoke_rejects_unadvertised_capability_without_network_request(self):
         peer = coordinator_module.Peer("rc-peer", "192.0.2.8", 8767,
                                        self.announcement(), self.now)

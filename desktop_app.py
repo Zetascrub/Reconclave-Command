@@ -25,6 +25,8 @@ from adaptive_scheduler import DistributedScanEngine
 from coordinator import Coordinator
 from engagement_policy import TARGET_CAPABILITIES, TARGET_PREFIXES, EngagementPolicy
 from fleet_manager import FleetManager
+from field_report import import_field_report
+from manual_peers import ManualPeers
 from operators import ApprovalManager, OperatorManager
 from reconclave_node import ANNOUNCE_PATH, MESSAGE_PATH, PROTOCOL, Node, local_ip
 from workspace_store import WorkspaceStore
@@ -32,8 +34,15 @@ from workflow_engine import WorkflowEngine
 from vulnerability_analysis import import_document
 
 WEB_ROOT = pathlib.Path(__file__).parent / "web" / "dist"
-DEFAULT_TRUST_STORE = pathlib.Path(__file__).resolve().parents[2] / ".reconclave-provisioning" / "fleet.json"
-DEFAULT_WORKSPACE_STORE = pathlib.Path(__file__).resolve().parents[2] / ".reconclave-data" / "workspace.json"
+_DESKTOP_ROOT = pathlib.Path(__file__).resolve().parent
+_SHARED_ROOT = _DESKTOP_ROOT.parent / "Reconclave"
+_SIBLING_TRUST_STORE = _SHARED_ROOT / ".reconclave-provisioning" / "fleet.json"
+DEFAULT_TRUST_STORE = (_SIBLING_TRUST_STORE if _SIBLING_TRUST_STORE.is_file()
+                       else _DESKTOP_ROOT / ".reconclave-provisioning" / "fleet.json")
+_SHARED_DATA = (_SHARED_ROOT / ".reconclave-data" if (_SHARED_ROOT / ".reconclave-data").is_dir()
+                else _DESKTOP_ROOT / ".reconclave-data")
+DEFAULT_WORKSPACE_STORE = _SHARED_DATA / "workspace.json"
+DEFAULT_PEERS_STORE = _SHARED_DATA / "manual-peers.json"
 MAX_BODY_BYTES = 2 * 1024 * 1024
 # /api/fleet/releases carries a whole firmware image as base64 (~1.34x inflation) plus a
 # little JSON overhead; FleetManager.MAX_ARTIFACT_BYTES bounds the decoded artifact itself,
@@ -399,6 +408,11 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_json(200, self.server.coordinator.state())
             else:
                 self.send_json(403, {"error": "local_access_only"})
+        elif path == "/api/peers":
+            if self.local_client():
+                self.send_json(200, {"peers": self.server.manual_peers.list()})
+            else:
+                self.send_json(403, {"error": "local_access_only"})
         elif path == "/api/workspace":
             if self.local_client():
                 self.send_json(200, self.server.workspace.snapshot())
@@ -474,9 +488,21 @@ class AppHandler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length))
             if not isinstance(body, dict):
                 raise ValueError("body must be an object")
+            parts = path.strip("/").split("/")
             if path == MESSAGE_PATH:
                 status, response = self.server.node.respond(body)
                 self.send_json(status, response)
+                return
+            if path == "/api/discovery/scan":
+                self.send_json(202, {"started": self.server.coordinator.start_scan()})
+                return
+            if len(parts) == 4 and parts[:2] == ["api", "nodes"] and parts[3] == "verify-trust":
+                self.send_json(200, self.server.coordinator.verify_trust(urllib.parse.unquote(parts[2])))
+                return
+            if path == "/api/peers":
+                address, port = self.server.manual_peers.add(body.get("address"), body.get("port"))
+                connected = self.server.coordinator.add_seed_peer(address, port)
+                self.send_json(200, {"address": address, "port": port, "connected": connected})
                 return
             if path == "/api/login":
                 self.send_json(200, self.server.operators.login(
@@ -584,6 +610,15 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/evidence":
                 self.send_json(201, self.server.workspace.add_evidence(body))
+                return
+            if path == "/api/evidence/field-report/import":
+                if body.get("operator_authorised") is not True:
+                    raise PermissionError("explicit field report import is required")
+                project_id = str(body.get("project_id", ""))
+                report = body.get("report")
+                if not isinstance(report, dict):
+                    raise ValueError("field report must be a JSON object")
+                self.send_json(201, import_field_report(self.server.workspace, project_id, report))
                 return
             if path == "/api/inspect":
                 self.server.policy.authorize(str(body.get("scope_id", "")),
@@ -738,7 +773,14 @@ class AppHandler(BaseHTTPRequestHandler):
         self.server.workspace.set_current_actor(operator["id"] if operator else "local-operator")
         parts = path.strip("/").split("/")
         try:
-            if len(parts) == 3 and parts[:2] == ["api", "automations"]:
+            if path == "/api/peers":
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                address = query.get("address", [""])[0]
+                port = query.get("port", [""])[0]
+                address, port = self.server.manual_peers.remove(address, port)
+                self.server.coordinator.remove_seed_peer(address, port)
+                self.send_json(200, {"address": address, "port": port})
+            elif len(parts) == 3 and parts[:2] == ["api", "automations"]:
                 rule_id = urllib.parse.unquote(parts[2])
                 rule = next((item for item in self.server.workspace.snapshot()["automations"]
                              if item.get("id") == rule_id), None)
@@ -805,7 +847,7 @@ class AppServer(ThreadingHTTPServer):
     def __init__(self, address: tuple[str, int], node: Node, coordinator: Coordinator,
                  workspace: WorkspaceStore, workflows: WorkflowEngine, policy: EngagementPolicy,
                  fleet: FleetManager, scheduler: DistributedScanEngine, operators: OperatorManager,
-                 approvals: ApprovalManager) -> None:
+                 approvals: ApprovalManager, manual_peers: ManualPeers | None = None) -> None:
         self.node = node
         self.coordinator = coordinator
         self.workspace = workspace
@@ -815,6 +857,7 @@ class AppServer(ThreadingHTTPServer):
         self.scheduler = scheduler
         self.operators = operators
         self.approvals = approvals
+        self.manual_peers = manual_peers or ManualPeers(DEFAULT_PEERS_STORE)
         super().__init__(address, AppHandler)
 
 
@@ -834,6 +877,8 @@ def main() -> None:
                         help="ignored per-link provisioning store")
     parser.add_argument("--workspace-store", type=pathlib.Path, default=DEFAULT_WORKSPACE_STORE,
                         help="local project/job/evidence index")
+    parser.add_argument("--peers-store", type=pathlib.Path, default=DEFAULT_PEERS_STORE,
+                        help="saved unicast discovery targets")
     args = parser.parse_args()
     if args.enable_network_scan and not args.execution_key:
         parser.error("an execution key is required when network scan is enabled")
@@ -853,6 +898,12 @@ def main() -> None:
         parser.error(f"could not load trust store: {error}")
     coordinator = Coordinator(node, zeroconf, args.execution_key, args.evidence_key,
                               trust_keys=trust_keys)
+    try:
+        manual_peers = ManualPeers(args.peers_store)
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
+        parser.error(f"could not load manual peers: {error}")
+    for peer in manual_peers.list():
+        coordinator.seed_peers.add((peer["address"], peer["port"]))
     if args.mode in ("coordinator", "both"):
         coordinator.start()
     try:
@@ -878,7 +929,7 @@ def main() -> None:
         "fleet.release.create": fleet.create_release,
     })
     server = AppServer(("0.0.0.0", args.port), node, coordinator, workspace, workflows, policy, fleet,
-                       scheduler, operators, approvals)
+                       scheduler, operators, approvals, manual_peers)
     automations = AutomationEngine(coordinator, workspace)
     automations.start()
     workflows.start()

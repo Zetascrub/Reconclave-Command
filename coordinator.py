@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from zeroconf import ServiceBrowser, ServiceInfo, ServiceListener, Zeroconf
+from lan_discovery import scan_lan
 
 from reconclave_node import ANNOUNCE_PATH, AUTH_TAG_BYTES, MESSAGE_PATH, OTA_UPLOAD_PATH, PROTOCOL, Node
 
@@ -25,6 +26,7 @@ REQUEST_TIMEOUT_SECONDS = 4.0
 # sized for lightweight capability calls and would false-positive on this one.
 OTA_UPLOAD_TIMEOUT_SECONDS = 60.0
 REFRESH_INTERVAL_SECONDS = 12.0
+LAN_SCAN_INTERVAL_SECONDS = 180.0
 COORDINATOR_PRIORITY = 100
 COORDINATOR_LEASE_MS = 15000
 
@@ -100,18 +102,45 @@ class Coordinator(ServiceListener):
         # and other embedders that don't need trace correlation.
         self.audit_sink = audit_sink
         self.peers: dict[str, Peer] = {}
+        self.seed_peers: set[tuple[str, int]] = set()
         self.lock = threading.RLock()
         self.changed = threading.Condition(self.lock)
         self.revision = 1
         self.browser: ServiceBrowser | None = None
         self.stopping = threading.Event()
         self.refresh_thread: threading.Thread | None = None
+        self.scan_thread: threading.Thread | None = None
+        self.scan_lock = threading.Lock()
+        self.scan_in_progress = False
+        self.last_scan_ms = 0
+        self.trust_proofs: dict[str, tuple[str, int, str, int]] = {}
+        self.trust_attempts: set[tuple[str, str, int, str]] = set()
 
     def start(self) -> None:
         self.browser = ServiceBrowser(self.zeroconf, "_reconclave._tcp.local.", self)
         self.refresh_thread = threading.Thread(target=self._refresh_loop,
                                                name="reconclave-refresh", daemon=True)
         self.refresh_thread.start()
+        self.scan_thread = threading.Thread(target=self._scan_loop, name="reconclave-lan-scan", daemon=True)
+        self.scan_thread.start()
+        for address, port in list(self.seed_peers):
+            threading.Thread(target=self.refresh_peer, args=(address, port), daemon=True).start()
+
+    def add_seed_peer(self, address: str, port: int) -> bool:
+        with self.lock:
+            self.seed_peers.add((address, port))
+        return self.refresh_peer(address, port)
+
+    def remove_seed_peer(self, address: str, port: int) -> None:
+        with self.changed:
+            self.seed_peers.discard((address, port))
+            removed = [key for key, peer in self.peers.items()
+                       if peer.address == address and peer.port == port
+                       and not peer.announcement.get("_service_name")]
+            for key in removed:
+                del self.peers[key]
+            if removed:
+                self._touch()
 
     def close(self) -> None:
         self.stopping.set()
@@ -119,6 +148,75 @@ class Coordinator(ServiceListener):
             self.browser.cancel()
         if self.refresh_thread is not None:
             self.refresh_thread.join(timeout=1.0)
+        if self.scan_thread is not None:
+            self.scan_thread.join(timeout=1.0)
+
+    def _scan_loop(self) -> None:
+        while not self.stopping.is_set():
+            self.start_scan()
+            if self.stopping.wait(LAN_SCAN_INTERVAL_SECONDS):
+                break
+
+    def start_scan(self) -> bool:
+        with self.scan_lock:
+            if self.scan_in_progress:
+                return False
+            self.scan_in_progress = True
+        threading.Thread(target=self._run_scan, name="reconclave-lan-pass", daemon=True).start()
+        return True
+
+    def _run_scan(self) -> None:
+        try:
+            scan_lan(self.node.address,
+                     lambda address, port: self.refresh_peer(address, port, timeout=0.8),
+                     self.stopping.is_set)
+        finally:
+            with self.scan_lock:
+                self.scan_in_progress = False
+                self.last_scan_ms = int(time.time() * 1000)
+            with self.changed:
+                self._touch()
+
+    def _key_for(self, device_id: str) -> bytes | None:
+        return self.trust_keys.get(device_id, self.execution_key)
+
+    @staticmethod
+    def _peer_identity(peer: Peer) -> tuple[str, int, str]:
+        security = peer.announcement.get("payload", {}).get("security", {})
+        return (peer.address, peer.port, str(security.get("boot_nonce", "")))
+
+    def trust_status(self, peer: Peer) -> dict:
+        if self._key_for(peer.device_id) is None:
+            return {"status": "unpaired"}
+        proof = self.trust_proofs.get(peer.device_id)
+        if proof is not None and proof[:3] == self._peer_identity(peer):
+            return {"status": "verified", "verified_at_ms": proof[3]}
+        return {"status": "key_installed"}
+
+    def verify_trust(self, device_id: str) -> dict:
+        with self.lock:
+            peer = self.peers.get(device_id)
+            if peer is None:
+                raise KeyError("node is no longer available")
+            if self._key_for(device_id) is None:
+                return {"status": "unpaired"}
+            descriptors = peer.announcement.get("payload", {}).get("capability_descriptors", [])
+            trusted = {item.get("id") for item in descriptors if item.get("permission") == "trusted"}
+        if "coordination.job.status" in trusted:
+            capability, arguments = "coordination.job.status", {"job_id": "reconclave-trust-check"}
+        elif "system.info" in trusted:
+            capability, arguments = "system.info", {}
+        else:
+            # A device whose only trusted operation is HID injection has no safe
+            # challenge. Never execute that operation merely to test pairing.
+            return {"status": "key_installed", "detail": "No safe verification capability advertised"}
+        try:
+            self.invoke(device_id, capability, arguments)
+        except (ConnectionError, ValueError, PermissionError) as error:
+            return {"status": "key_installed", "detail": str(error)}
+        with self.lock:
+            current = self.peers.get(device_id)
+            return self.trust_status(current) if current else {"status": "unavailable"}
 
     def _refresh_loop(self) -> None:
         while not self.stopping.wait(REFRESH_INTERVAL_SECONDS):
@@ -126,6 +224,9 @@ class Coordinator(ServiceListener):
                 targets = [(peer.address, peer.port,
                             str(peer.announcement.get("_service_name", "")))
                            for peer in self.peers.values()]
+                targets.extend((address, port, "") for address, port in self.seed_peers
+                               if not any(peer.address == address and peer.port == port
+                                          for peer in self.peers.values()))
             for address, port, service_name in targets:
                 if self.stopping.is_set():
                     return
@@ -161,13 +262,18 @@ class Coordinator(ServiceListener):
         threading.Thread(target=self.refresh_peer,
                          args=(addresses[0], info.port, name), daemon=True).start()
 
-    def refresh_peer(self, address: str, port: int, service_name: str = "") -> bool:
+    def refresh_peer(self, address: str, port: int, service_name: str = "",
+                     timeout: float = REQUEST_TIMEOUT_SECONDS) -> bool:
         try:
             with urllib.request.urlopen(
                     f"http://{address}:{port}{ANNOUNCE_PATH}",
-                    timeout=REQUEST_TIMEOUT_SECONDS) as response:
+                    timeout=timeout) as response:
                 announcement = json.load(response)
+            if not isinstance(announcement, dict):
+                return False
             payload = announcement.get("payload", {})
+            if not isinstance(payload, dict):
+                return False
             device_id = str(payload.get("device_id", ""))
             if (announcement.get("proto") != PROTOCOL or
                     announcement.get("type") != "announce" or
@@ -178,8 +284,13 @@ class Coordinator(ServiceListener):
                 self.peers[device_id] = Peer(
                     device_id, address, port, announcement, self.clock())
                 self._touch()
+                peer = self.peers[device_id]
+                identity = (device_id, *self._peer_identity(peer))
+                if self._key_for(device_id) and identity not in self.trust_attempts and self.trust_status(peer)["status"] != "verified":
+                    self.trust_attempts.add(identity)
+                    threading.Thread(target=self.verify_trust, args=(device_id,), daemon=True).start()
             return True
-        except (OSError, ValueError, urllib.error.URLError):
+        except (OSError, ValueError, TypeError, urllib.error.URLError):
             return False
 
     def expire(self) -> bool:
@@ -204,10 +315,13 @@ class Coordinator(ServiceListener):
             "local": True,
         }
         with self.lock:
-            nodes = [local_node] + [peer.public(now) for peer in self.peers.values()]
+            local_node["trust"] = {"status": "local"}
+            nodes = [local_node] + [{**peer.public(now), "trust": self.trust_status(peer)} for peer in self.peers.values()]
             nodes.sort(key=lambda item: (not item["local"], item["device_id"]))
             return {"revision": self.revision, "nodes": nodes,
                     "coordinator_id": self.node.node_id,
+                    "discovery": {"scan_in_progress": self.scan_in_progress,
+                                  "last_scan_ms": self.last_scan_ms},
                     "updated_at_ms": int(time.time() * 1000)}
 
     def wait_for_change(self, revision: int, timeout: float = 15.0) -> dict:
@@ -335,6 +449,12 @@ class Coordinator(ServiceListener):
             expected_tag = hmac.new(key, response_canonical, hashlib.sha256).digest()[:AUTH_TAG_BYTES].hex()
             if not hmac.compare_digest(response_tag, expected_tag):
                 raise ConnectionError("node returned an invalid response authentication tag")
+            if device_id != self.node.node_id:
+                with self.changed:
+                    current = self.peers.get(device_id)
+                    if current is not None and (current.address, current.port) == (target_address, target_port):
+                        self.trust_proofs[device_id] = (*self._peer_identity(current), int(time.time() * 1000))
+                        self._touch()
         if device_id != self.node.node_id:
             with self.changed:
                 current = self.peers.get(device_id)

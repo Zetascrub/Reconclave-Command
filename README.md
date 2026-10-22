@@ -44,9 +44,23 @@ a standalone local application without a hardware fleet.
 ## Quick start
 
 The desktop web application is the recommended interactive runtime. It acts as
-a node, coordinator, or both; discovers `_reconclave._tcp.local` peers; expires
-stale nodes after 45 seconds; presents capability and resource metadata; and
+a node, coordinator, or both; discovers `_reconclave._tcp.local` peers and runs
+a bounded fallback scan of its active private LAN on startup and every three
+minutes; expires stale nodes after 45 seconds; presents capability and resource metadata; and
 can invoke safe inspection capabilities from a live node detail view.
+Use **Fleet health** to see online/offline devices, firmware, desired-config
+drift, and verified trust status. **Scan again** starts a fresh discovery pass.
+Discovery does not grant trust: a node is verified only after the desktop checks
+a signed response using its locally provisioned key. The T-Dongle's current
+firmware only advertises a trusted HID command, so the desktop displays its key
+as installed but never runs HID automatically to test it. A harmless trusted
+status capability is needed for automatic verification there.
+
+If a device is on another subnet or discovery still misses it, use **Devices → Add a device**
+and enter its LAN IP address and Reconclave HTTP port. Saved addresses are
+retried on startup and every refresh cycle. The K230, P4 PoE, Cardputer,
+and T-Dongle use DHCP, so check their current addresses in **Devices** before
+adding a manual peer.
 
 Build the React interface once, then start the local application:
 
@@ -96,6 +110,11 @@ The primary rail also provides persistent **Projects**, **Jobs**, **Evidence**,
 and **Map** workspaces. Create a project before dispatching Scout to archive its
 job lifecycle and a deduplicated network-host evidence summary. Map view can be
 switched between an interactive node graph and a sortable/filterable list.
+The Evidence page can import a `field-report-*.json` file exported by Sightline.
+Select the desktop project before importing. Reconclave checks the embedded
+summary hash, records the host coverage and raw-file hash inventory, and marks
+the device origin as unverified. Transfer the listed raw evidence separately if
+you need to verify those file hashes; the JSON is a handoff, not an attestation.
 Selecting one host reveals its identity, status, capabilities, prior evidence,
 and latest observed ports; multiple hosts can be selected for a bounded TCP
 inspection using common, web, or custom port sets. Inspection is limited to 16
@@ -145,6 +164,10 @@ therefore authenticate the desktop primary and Cardputer secondary without a
 Grove connection or a shared fleet-wide secret. See
 [Reconclave trust architecture](https://github.com/Zetascrub/Reconclave/blob/main/docs/trust-architecture.md) for generation,
 rotation, and limitations.
+The default trust-store and workspace-data lookups use the sibling `Reconclave`
+repository's ignored stores when present, so the desktop uses the keys and
+projects already shared with the devices. Pass `--trust-store` or
+`--workspace-store` for another location.
 
 For UI development, run `npm run dev` in `web/` while `desktop_app.py` is
 running; Vite proxies `/api` requests to port 8767.

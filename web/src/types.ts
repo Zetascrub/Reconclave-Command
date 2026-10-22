@@ -32,6 +32,7 @@ export type ReconNode = {
   port: number
   age_seconds: number
   local: boolean
+  trust?: { status: 'local' | 'unpaired' | 'key_installed' | 'verified'; verified_at_ms?: number; detail?: string }
 }
 
 export type AppState = {
@@ -39,6 +40,7 @@ export type AppState = {
   nodes: ReconNode[]
   coordinator_id: string
   updated_at_ms: number
+  discovery?: { scan_in_progress: boolean; last_scan_ms: number }
 }
 
 export type Activity = {
